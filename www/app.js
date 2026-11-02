@@ -70,7 +70,7 @@ function applyLang() {
   $("#clearHist").textContent = t("clearHist");
   $("#installBtn").textContent = t("install");
   $$(".ti").forEach((e) => (e.innerHTML = ico(e.dataset.ico)));
-  $("#dbInfo").textContent = t("dbInfo", { n: Object.keys(DRUGS).length, m: Object.keys(ALIASES).length }) + (S.lang === "en" ? " · " + t("contentLangNote") : "");
+  $("#dbInfo").textContent = t("dbInfo", { n: Object.keys(DRUGS).length, m: Object.values(DRUGS).filter((x) => !x.brief).length }) + (S.lang === "en" ? " · " + t("contentLangNote") : "");
   renderThumbs(); renderSuggest(); renderHist(); if (st.cur) renderDrug(); if (st.lastOcr) renderCands();
   fillSettings();
 }
@@ -88,7 +88,10 @@ const isFa = (s) => /[؀-ۿ]/.test(s);
 const IDX = [];
 for (const [key, names] of Object.entries(ALIASES)) {
   const seen = new Set();
-  for (const nm of [key, ...names]) { const n = norm(nm); if (n.length >= 3 && !seen.has(n)) { seen.add(n); IDX.push({ n, key, raw: nm }); } }
+  for (const nm of [key, ...names]) {
+    const n = norm(nm);
+    for (const v of [n, n.includes(" and ") ? n.replace(/ and /g, " ") : ""]) if (v && v.length >= 3 && !seen.has(v)) { seen.add(v); IDX.push({ n: v, key, raw: nm }); }
+  }
 }
 function lev(a, b, max) {
   if (Math.abs(a.length - b.length) > max) return max + 1;
@@ -402,6 +405,7 @@ function renderDrug() {
   const head = $("#drugHead");
   head.innerHTML = `<h2>${esc(faName(c.active))}</h2><div class="en">${esc(titleEn(c.active))}</div>` +
     (d ? `<span class="chip cls">${esc(d.cls)}</span>` : "") +
+    (d && d.brief ? `<p class="note">${t("briefNote")}</p>` : "") +
     (c.keys.length > 1 ? `<p class="note">${t("combo")}</p>` : "") +
     (S.lang === "en" ? `<p class="note">${t("contentLangNote")}</p>` : "");
   $("#alts").innerHTML = c.keys.length > 1 ? c.keys.map((k) => `<button data-k="${esc(k)}" class="${k === c.active ? "on" : ""}">${esc(faName(k).split(" (")[0])}</button>`).join("") : "";
@@ -532,9 +536,10 @@ async function doReport() {
 /* ------------------------------------------------------------------ manual search */
 function suggest(inputEl, boxEl) {
   const q = norm(inputEl.value); if (q.length < 2) { boxEl.hidden = true; return; }
-  const seen = new Map();
-  for (const x of IDX) if (x.n.includes(q) && !seen.has(x.key)) seen.set(x.key, x.n.startsWith(q) ? 0 : 1);
-  const res = [...seen.entries()].sort((a, b) => (a[1] - b[1]) || ((DRUGS[b[0]] ? 1 : 0) - (DRUGS[a[0]] ? 1 : 0))).slice(0, 8).map(([k]) => k);
+  const qs = q.replace(/ /g, ""), seen = new Map();
+  for (const x of IDX) { const ns = x.n.replace(/ /g, ""); if ((x.n.includes(q) || ns.includes(qs)) && !seen.has(x.key)) seen.set(x.key, (x.n.startsWith(q) || ns.startsWith(qs)) ? 0 : 1); }
+  if (seen.size < 3 && qs.length >= 4) for (const x of IDX) { const ns = x.n.replace(/ /g, ""); if (!seen.has(x.key) && ns.length >= 4 && (lev(qs, ns.slice(0, qs.length), 1) <= 1 || lev(qs, ns, 2) <= 2)) seen.set(x.key, 2); }
+  const res = [...seen.entries()].sort((a, b) => (a[1] - b[1]) || ((DRUGS[b[0]] && !DRUGS[b[0]].brief ? 1 : 0) - (DRUGS[a[0]] && !DRUGS[a[0]].brief ? 1 : 0))).slice(0, 8).map(([k]) => k);
   boxEl.innerHTML = res.map((k) => `<button type="button" data-key="${esc(k)}"><span>${esc(faName(k))}</span><small>${esc(titleEn(k))}</small></button>`).join("");
   boxEl.hidden = !res.length;
 }
