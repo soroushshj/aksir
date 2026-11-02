@@ -107,21 +107,24 @@ function lev(a, b, max) {
 function findDrugs(text) {
   const t0 = norm(text), padded = " " + t0 + " ", toks = t0.split(" ").filter(Boolean);
   const found = new Map();
-  const add = (key, score, hit) => { const c = found.get(key); if (!c || c.score < score) found.set(key, { key, score, hit }); };
-  for (const x of IDX) if (x.n.length >= 4 && padded.includes(" " + x.n + " ")) add(x.key, 1, x.raw);
+  const add = (key, score, hit, n) => { const c = found.get(key); if (!c) found.set(key, { key, score, hit, n: n || norm(hit), hits: 1 }); else { c.hits++; if (c.score < score) { c.score = score; c.hit = hit; c.n = n || norm(hit); } } };
+  for (const x of IDX) if (x.n.length >= 4 && padded.includes(" " + x.n + " ")) add(x.key, 1, x.raw, x.n);
   // persian words are often glued or split by OCR: also look inside the space-free text
   const glued = t0.replace(/ /g, "");
-  for (const x of IDX) if (isFa(x.n) && x.n.length >= 6 && glued.includes(x.n.replace(/ /g, ""))) add(x.key, 0.97, x.raw);
-  for (const x of IDX) if (!isFa(x.n) && x.n.length >= 8 && glued.includes(x.n.replace(/ /g, ""))) add(x.key, 0.93, x.raw);
+  for (const x of IDX) if (isFa(x.n) && x.n.length >= 6 && glued.includes(x.n.replace(/ /g, ""))) add(x.key, 0.97, x.raw, x.n);
+  for (const x of IDX) if (!isFa(x.n) && x.n.length >= 8 && glued.includes(x.n.replace(/ /g, ""))) add(x.key, 0.93, x.raw, x.n);
   const grams = new Set();
   for (let n = 1; n <= 3; n++) for (let i = 0; i + n <= toks.length; i++) { const g = toks.slice(i, i + n).join(" "); if (g.length >= 6 && g.length <= 40) grams.add(g); }
   for (const g of grams) for (const x of IDX) {
     const L = x.n.length; if (L < 6) continue;
     const max = L >= 12 ? 3 : L >= 9 ? 2 : L >= 6 ? 1 : 0; if (!max) continue;
     const d = lev(g, x.n, max);
-    if (d <= max) add(x.key, 0.95 - d * 0.07, x.raw);
+    if (d <= max) add(x.key, 0.95 - d * 0.07, x.raw, x.n);
   }
-  return [...found.values()].filter((c) => c.score >= 0.72)
+  let list = [...found.values()];
+  for (const c of list) if (c.score < 1) c.score = Math.min(0.99, c.score + 0.04 * Math.min(3, c.hits - 1));
+  list = list.filter((a) => a.score >= 1 || !list.some((b) => b !== a && b.n.length > a.n.length && b.n.includes(a.n) && b.score >= a.score - 0.2));
+  return list.filter((c) => c.score >= 0.72)
     .sort((a, b) => (b.score - a.score) || ((DRUGS[b.key] ? 1 : 0) - (DRUGS[a.key] ? 1 : 0)));
 }
 const faName = (key) => DRUGS[key]?.fa || (ALIASES[key] || []).find(isFa) || key;
@@ -206,7 +209,7 @@ async function prepCanvas(blob, mode, rot = 0, maxSide = 1500) {
   if (mode === "enh") stretch(ctx, c); else if (mode === "bin") { stretch(ctx, c); binarize(ctx, c, false); } else if (mode === "inv") { stretch(ctx, c); binarize(ctx, c, true); }
   return c;
 }
-const WORKERS = {};
+const WORKERS = {}; let TESS_DEAD = false;
 const abs = (p) => new URL(p, location.href).href.replace(/\/$/, "");
 const NATIVE = () => !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
 const DBG = []; let LIVE = () => {}, T0 = Date.now();
@@ -216,7 +219,7 @@ function getWorker(lang) {
   const H = { f: null }; dbg("create worker " + lang);
   const p = Tesseract.createWorker(lang, 1, {
     workerPath: abs("lib/tess/worker.min.js"), corePath: abs("lib/tess/core"), langPath: abs("lib/tess/lang"),
-    gzip: true, workerBlobURL: false, cacheMethod: "none",
+    gzip: false, workerBlobURL: false, cacheMethod: "none",
     logger: (m) => { if (m.status !== "recognizing text") dbg(m.status + " " + Math.round((m.progress || 0) * 100) + "%"); LIVE(m); H.f && H.f(m); },
   }).then((w) => { dbg("worker ready " + lang); w._set = (f) => { H.f = f; }; return w; });
   p.catch((e) => { dbg("worker error " + (e && e.message)); delete WORKERS[lang]; });
@@ -274,8 +277,12 @@ async function runOcr(onStage, onProgress) {
       }
     }
   }
-  for (const [lang, psm, mode, rot, label] of planFor(S.ocr)) {
-    if (Date.now() - start > 170000) { dbg("time budget over"); break; }
+  let plan = planFor(S.ocr);
+  if (NATIVE()) plan = plan.filter((p) => p[0] !== "eng");
+  if (NATIVE() && S.ocr === "eng") plan = [];
+  for (const [lang, psm, mode, rot, label] of plan) {
+    if (TESS_DEAD) { dbg("tesseract unavailable, skipped"); break; }
+    if (Date.now() - start > 150000) { dbg("time budget over"); break; }
     try {
       onStage("load");
       const w = await withTimeout(getWorker(lang), 120000, "load " + lang);
@@ -293,7 +300,7 @@ async function runOcr(onStage, onProgress) {
         await new Promise((r2) => setTimeout(r2, 0));
         if (good()) return done();
       }
-    } catch (e) { dbg("step failed: " + (e && e.message)); }
+    } catch (e) { dbg("step failed: " + (e && e.message)); if (/load/.test(String(e && e.message))) TESS_DEAD = true; }
   }
   return done();
 }
@@ -310,7 +317,7 @@ async function doScan() {
     st.lastOcr = { log: r.log, text: r.text, conf: r.conf, found: findDrugs(r.text), facts: extractFacts(r.text), thumb: st.images[0]?.url || "" };
     renderCands();
     $("#candCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
-    if (st.lastOcr.found.length === 1 || (st.lastOcr.found[0] && st.lastOcr.found[0].score >= 0.97 && DRUGS[st.lastOcr.found[0].key])) { /* wait for user tap: avoids wrong auto-picks */ }
+    if (st.lastOcr.found.length === 1 || (st.lastOcr.found[0] && st.lastOcr.found[0].score >= 0.93 && DRUGS[st.lastOcr.found[0].key])) { /* wait for user tap: avoids wrong auto-picks */ }
   } catch (e) { console.warn(e); toast(t("ocrFail")); }
   clearInterval(timer); st.busy = false; $("#progress").hidden = true; fill.style.width = "0%"; renderThumbs();
 }
@@ -321,9 +328,9 @@ function renderCands() {
   const list = o.found.slice(0, 5);
   $("#cands").innerHTML = list.length ? list.map((c, i) => `<button class="cand" data-key="${esc(c.key)}">
       <span class="nm"><b>${esc(faName(c.key))}</b><small>${esc(titleEn(c.key))}</small></span>
-      <span class="badge ${c.score >= 0.97 ? "" : "maybe"}">${c.score >= 0.97 ? t("sure") : t("maybe")}</span><span class="go">${ico("chev")}</span></button>`).join("")
+      <span class="badge ${c.score >= 0.93 ? "" : "maybe"}">${c.score >= 0.93 ? t("sure") : t("maybe")}</span><span class="go">${ico("chev")}</span></button>`).join("")
     + (list.length > 1 ? `<button class="btn soft" data-all="1">${S.lang === "fa" ? "همهٔ این‌ها (بستهٔ ترکیبی)" : "All of these (combination pack)"}</button>` : "")
-    : `<p class="muted sm">${t("noMatch")}</p>`;
+    : `<p class="muted sm">${t("noMatch")}</p><p class="muted sm">${t("tips")}</p>`;
   const words = [...new Set(String(o.text || "").split(/[^\p{L}]+/u).filter((w) => w.length >= 5 && w.length <= 24 && /^[\p{L}]+$/u.test(w)))].slice(0, 14);
   let wb = $("#words"); if (!wb) { wb = document.createElement("div"); wb.id = "words"; wb.className = "wordchips"; $("#facts").before(wb); }
   wb.innerHTML = (!list.length || list[0].score < 0.97) && words.length ? `<p class="muted sm">${S.lang === "fa" ? "کلمه‌های خوانده‌شده؛ روی نام دارو بزن تا جست‌وجو شود:" : "Words read; tap the drug name to search:"}</p>` + words.map((w) => `<button type="button" class="chip" data-word="${esc(w)}">${esc(w)}</button>`).join(" ") : "";
