@@ -1,7 +1,0 @@
-{
-  "appId": "com.soroush.aksir",
-  "appName": "اکسیر",
-  "webDir": "www",
-  "android": { "allowMixedContent": false },
-  "server": { "androidScheme": "https" }
-}
