@@ -81,7 +81,7 @@ function norm(s) {
   s = String(s || "").replace(/[يكۀةأإؤئ]/g, (c) => AR[c]);
   s = s.replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
   s = s.replace(/[ً-ٰٟـ]/g, "").replace(/‌/g, " ").replace(/‍/g, "").toLowerCase();
-  s = s.replace(/[^\p{L}\p{N}\s\-+.]/gu, " ");
+  s = s.replace(/[^\p{L}\p{N}\s+.]/gu, " ");
   return s.replace(/\s+/g, " ").trim();
 }
 const isFa = (s) => /[؀-ۿ]/.test(s);
@@ -112,6 +112,7 @@ function findDrugs(text) {
   // persian words are often glued or split by OCR: also look inside the space-free text
   const glued = t0.replace(/ /g, "");
   for (const x of IDX) if (isFa(x.n) && x.n.length >= 6 && glued.includes(x.n.replace(/ /g, ""))) add(x.key, 0.97, x.raw);
+  for (const x of IDX) if (!isFa(x.n) && x.n.length >= 8 && glued.includes(x.n.replace(/ /g, ""))) add(x.key, 0.93, x.raw);
   const grams = new Set();
   for (let n = 1; n <= 3; n++) for (let i = 0; i + n <= toks.length; i++) { const g = toks.slice(i, i + n).join(" "); if (g.length >= 6 && g.length <= 40) grams.add(g); }
   for (const g of grams) for (const x of IDX) {
@@ -165,12 +166,25 @@ function renderThumbs() {
   $("#imgCount").textContent = st.images.length ? `${st.images.length}/4 ${t("images")}` : "";
   $("#scanBtn").disabled = !st.images.length || st.busy;
 }
-async function prepCanvas(blob, enhance) {
-  const bmp = await loadBitmap(blob);
-  let k = 1800 / Math.max(bmp.width, bmp.height); if (k > 1.6) k = 1.6;
-  const c = document.createElement("canvas"); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
-  const ctx = c.getContext("2d", { willReadFrequently: true }); ctx.drawImage(bmp, 0, 0, c.width, c.height);
-  if (!enhance) return c;
+function binarize(ctx, c, invert) {
+  const w = c.width, h = c.height, im = ctx.getImageData(0, 0, w, h), d = im.data, g = new Uint8Array(w * h);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) { const v = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000 | 0; g[j] = invert ? 255 - v : v; }
+  const W = w + 1, ii = new Uint32Array(W * (h + 1));
+  for (let y = 0; y < h; y++) { let row = 0; for (let x = 0; x < w; x++) { row += g[y * w + x]; ii[(y + 1) * W + x + 1] = ii[y * W + x + 1] + row; } }
+  const r = Math.max(8, (Math.min(w, h) / 20) | 0);
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+      const sum = ii[y1 * W + x1] - ii[y0 * W + x1] - ii[y1 * W + x0] + ii[y0 * W + x0];
+      const mean = sum / ((x1 - x0) * (y1 - y0));
+      const v = g[y * w + x] < mean * 0.93 ? 0 : 255, o = (y * w + x) * 4;
+      d[o] = d[o + 1] = d[o + 2] = v;
+    }
+  }
+  ctx.putImageData(im, 0, 0);
+}
+function stretch(ctx, c) {
   const im = ctx.getImageData(0, 0, c.width, c.height), d = im.data, hist = new Uint32Array(256);
   for (let i = 0; i < d.length; i += 4) { const g = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000 | 0; d[i] = d[i + 1] = d[i + 2] = g; hist[g]++; }
   const total = c.width * c.height; let acc = 0, lo = 0, hi = 255;
@@ -178,39 +192,56 @@ async function prepCanvas(blob, enhance) {
   acc = 0; for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc > total * 0.02) { hi = i; break; } }
   const span = Math.max(40, hi - lo);
   for (let i = 0; i < d.length; i += 4) { const v = Math.max(0, Math.min(255, ((d[i] - lo) * 255) / span)); d[i] = d[i + 1] = d[i + 2] = v; }
-  ctx.putImageData(im, 0, 0); return c;
+  ctx.putImageData(im, 0, 0);
 }
-let WORKER = null, WORKER_LANG = "";
+/* mode: enh (contrast stretch) | bin (adaptive threshold) | inv (adaptive threshold on inverted image); rot: 0/90/270 */
+async function prepCanvas(blob, mode, rot = 0, maxSide = 1500) {
+  const bmp = await loadBitmap(blob);
+  const k = Math.min(1.5, maxSide / Math.max(bmp.width, bmp.height)), sw = Math.round(bmp.width * k), sh = Math.round(bmp.height * k);
+  const c = document.createElement("canvas"), swap = rot === 90 || rot === 270;
+  c.width = swap ? sh : sw; c.height = swap ? sw : sh;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+  ctx.save(); ctx.translate(c.width / 2, c.height / 2); ctx.rotate((rot * Math.PI) / 180); ctx.drawImage(bmp, -sw / 2, -sh / 2, sw, sh); ctx.restore();
+  if (mode === "enh") stretch(ctx, c); else if (mode === "bin") { stretch(ctx, c); binarize(ctx, c, false); } else if (mode === "inv") { stretch(ctx, c); binarize(ctx, c, true); }
+  return c;
+}
+const WORKERS = {};
 const abs = (p) => new URL(p, location.href).href.replace(/\/$/, "");
-async function getWorker(onLog) {
-  if (WORKER && WORKER_LANG === S.ocr) { WORKER._set(onLog); return WORKER; }
-  if (WORKER) { try { await WORKER.terminate(); } catch {} WORKER = null; }
-  const H = { f: onLog };
-  const w = await Tesseract.createWorker(S.ocr, 1, {
+function getWorker(lang) {
+  if (WORKERS[lang]) return WORKERS[lang];
+  const H = { f: null };
+  const p = Tesseract.createWorker(lang, 1, {
     workerPath: abs("lib/tess/worker.min.js"), corePath: abs("lib/tess/core"), langPath: abs("lib/tess/lang"),
     gzip: true, workerBlobURL: false, cacheMethod: "none", logger: (m) => H.f && H.f(m),
-  });
-  w._log = (m) => H.f && H.f(m); w._set = (f) => { H.f = f; }; WORKER = w; WORKER_LANG = S.ocr; return w;
+  }).then((w) => { w._set = (f) => { H.f = f; }; return w; });
+  p.catch(() => { delete WORKERS[lang]; });
+  return (WORKERS[lang] = p);
+}
+function planFor(pref) {
+  const E = [["eng", "11", "enh", 0, "eng"], ["eng", "11", "bin", 0, "alt"], ["eng", "6", "inv", 0, "alt"], ["eng", "11", "enh", 90, "rot"], ["eng", "11", "enh", 270, "rot"]];
+  const F = (l) => [[l, "11", "enh", 0, "fas"], [l, "3", "bin", 0, "fas"], [l, "11", "enh", 90, "rot"], [l, "11", "enh", 270, "rot"]];
+  return pref === "eng" ? E : pref === "fas" ? F("fas") : [...E.slice(0, 2), ...F("fas+eng"), ...E.slice(2)];
 }
 async function runOcr(onStage, onProgress) {
-  const n = st.images.length; let text = "", conf = 0, count = 0;
-  onStage("load");
-  const w = await getWorker((m) => { if (m.status === "recognizing text") onProgress(m.progress); });
-  const pass = async (psm, enhance, label) => {
+  const imgs = st.images, n = imgs.length; let text = "", conf = 0, cnt = 0;
+  const good = () => (findDrugs(text)[0]?.score || 0) >= 0.9;
+  const seen = {};
+  for (const [lang, psm, mode, rot, label] of planFor(S.ocr)) {
+    onStage(WORKERS[lang] ? label : "load");
+    const w = await getWorker(lang);
+    onStage(label);
     await w.setParameters({ tessedit_pageseg_mode: psm, preserve_interword_spaces: "1" });
     for (let i = 0; i < n; i++) {
-      onStage(label, i);
       w._set((m) => { if (m.status === "recognizing text") onProgress((i + m.progress) / n); });
-      const c = await prepCanvas(st.images[i].blob, enhance);
+      const c = await prepCanvas(imgs[i].blob, mode, rot);
       const r = await w.recognize(c);
-      text += "\n" + (r.data.text || ""); conf += r.data.confidence || 0; count++;
+      const tx = r.data.text || ""; text += "\n" + tx; conf += r.data.confidence || 0; cnt++;
       await new Promise((r2) => setTimeout(r2, 0));
+      if (good()) return { text: text.trim(), conf: cnt ? conf / cnt : 0 };
     }
-  };
-  await pass("3", true, "read");
-  let found = findDrugs(text);
-  if (!found.length) { onStage("retry"); await pass("11", false, "retry"); }
-  return { text: text.trim(), conf: count ? conf / count : 0 };
+  }
+  return { text: text.trim(), conf: cnt ? conf / cnt : 0 };
 }
 async function doScan() {
   if (!st.images.length || st.busy) return;
@@ -467,8 +498,10 @@ function bindSettings() {
 }
 
 /* ------------------------------------------------------------------ wiring */
+window.__aksir = { findDrugs, norm };
 function init() {
   applyTheme(); bindSettings(); applyLang();
+  setTimeout(() => { try { getWorker(S.ocr === "fas" ? "fas" : "eng"); } catch {} }, 1500);
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => S.appearance === "system" && applyTheme());
   $("#langBtn").onclick = () => { S.lang = S.lang === "fa" ? "en" : "fa"; saveS(); applyLang(); };
   $("#camBtn").onclick = () => $("#capture").click(); $("#pickBtn").onclick = () => $("#file").click();

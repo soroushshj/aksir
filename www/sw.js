@@ -1,8 +1,8 @@
 // Offline-first: everything (app, drug database, OCR engine and languages) is cached at install time.
-const V = "aksir-offline-v1";
+const V = "aksir-offline-v2";
 const ASSETS = [
   "./", "index.html", "style.css", "app.js", "i18n.js", "manifest.webmanifest",
-  "data/drugs.js", "data/aliases.js",
+  "data/drugs.js", "data/aliases.js", "data/aliases2.js", "data/drugs_b1.js", "data/drugs_b2.js", "data/drugs_b3.js", "data/drugs_b4.js", "data/drugs_b5.js",
   "fonts/Vazirmatn.woff2", "fonts/Fraunces.woff2",
   "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png",
   "lib/tess/tesseract.min.js", "lib/tess/worker.min.js",

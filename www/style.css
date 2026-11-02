@@ -324,3 +324,5 @@ input[type=search]{-webkit-appearance:none;appearance:none}
 dialog .tabpane{max-height:70dvh}
 .hint{white-space:pre-line}
 @media (min-width:900px){.tabbar{display:none}main{padding-bottom:30px}.foot{padding-bottom:30px}}
+
+.foot{justify-content:center;text-align:center;font-size:.72rem;opacity:.75;padding-top:10px}
