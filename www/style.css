@@ -326,3 +326,4 @@ dialog .tabpane{max-height:70dvh}
 @media (min-width:900px){.tabbar{display:none}main{padding-bottom:30px}.foot{padding-bottom:30px}}
 
 .foot{justify-content:center;text-align:center;font-size:.72rem;opacity:.75;padding-top:10px}
+.wordchips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}.wordchips p{width:100%;margin:0}.wordchips .chip{cursor:pointer;font:inherit;font-size:.8rem}

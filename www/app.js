@@ -117,11 +117,11 @@ function findDrugs(text) {
   for (let n = 1; n <= 3; n++) for (let i = 0; i + n <= toks.length; i++) { const g = toks.slice(i, i + n).join(" "); if (g.length >= 6 && g.length <= 40) grams.add(g); }
   for (const g of grams) for (const x of IDX) {
     const L = x.n.length; if (L < 6) continue;
-    const max = L >= 12 ? 3 : L >= 9 ? 2 : L >= 7 ? 1 : 0; if (!max) continue;
+    const max = L >= 12 ? 3 : L >= 9 ? 2 : L >= 6 ? 1 : 0; if (!max) continue;
     const d = lev(g, x.n, max);
     if (d <= max) add(x.key, 0.95 - d * 0.07, x.raw);
   }
-  return [...found.values()].filter((c) => c.score >= 0.8)
+  return [...found.values()].filter((c) => c.score >= 0.72)
     .sort((a, b) => (b.score - a.score) || ((DRUGS[b.key] ? 1 : 0) - (DRUGS[a.key] ? 1 : 0)));
 }
 const faName = (key) => DRUGS[key]?.fa || (ALIASES[key] || []).find(isFa) || key;
@@ -242,11 +242,36 @@ async function runOcr(onStage, onProgress) {
   const good = () => (findDrugs(text)[0]?.score || 0) >= 0.9;
   const done = () => ({ text: text.trim(), conf: cnt ? conf / cnt : 0, log: DBG.join("\n") });
   if (NATIVE()) {
-    onStage("native");
-    for (let i = 0; i < n; i++) {
-      try { const tx = await withTimeout(mlkitText(imgs[i].blob, i), 40000, "mlkit"); dbg("mlkit " + i + " chars=" + tx.length); text += "\n" + tx; conf += 80; cnt++; onProgress((i + 1) / n); }
-      catch (e) { dbg("mlkit failed: " + (e && (e.message || e))); }
-      if (good()) return done();
+    onStage("native"); let k = 0; const total = n * 5;
+    const toBlob = (c) => new Promise((r) => c.toBlob(r, "image/jpeg", 0.92));
+    const tiles = async (blob) => {
+      const bmp = await loadBitmap(blob), W = bmp.width, H = bmp.height, out = [];
+      const tw = Math.round(W * 0.62), th = Math.round(H * 0.62);
+      for (const [fx, fy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+        const c = document.createElement("canvas"); c.width = tw; c.height = th;
+        c.getContext("2d").drawImage(bmp, fx * (W - tw), fy * (H - th), tw, th, 0, 0, tw, th); out.push(await toBlob(c));
+      }
+      return out;
+    };
+    const variants = [
+      ["full", async (b) => [b]],
+      ["enh", async (b) => [await toBlob(await prepCanvas(b, "enh", 0, 2000))]],
+      ["tiles", tiles],
+      ["rot90", async (b) => [await toBlob(await prepCanvas(b, "plain", 90, 2000))]],
+      ["rot270", async (b) => [await toBlob(await prepCanvas(b, "plain", 270, 2000))]],
+    ];
+    for (const [name, make] of variants) {
+      for (let i = 0; i < n; i++) {
+        try {
+          const parts = await make(imgs[i].blob);
+          for (let j = 0; j < parts.length; j++) {
+            const t1 = Date.now(), tx = await withTimeout(mlkitText(parts[j], i * 10 + j), 30000, "mlkit");
+            dbg("mlkit " + name + " img" + i + "." + j + " chars=" + tx.length + " " + (Date.now() - t1) + "ms"); text += "\n" + tx; conf += 80; cnt++;
+          }
+        } catch (e) { dbg("mlkit " + name + " failed: " + (e && (e.message || e))); }
+        onProgress(Math.min(1, ++k / total));
+        if (good()) return done();
+      }
     }
   }
   for (const [lang, psm, mode, rot, label] of planFor(S.ocr)) {
@@ -299,6 +324,9 @@ function renderCands() {
       <span class="badge ${c.score >= 0.97 ? "" : "maybe"}">${c.score >= 0.97 ? t("sure") : t("maybe")}</span><span class="go">${ico("chev")}</span></button>`).join("")
     + (list.length > 1 ? `<button class="btn soft" data-all="1">${S.lang === "fa" ? "همهٔ این‌ها (بستهٔ ترکیبی)" : "All of these (combination pack)"}</button>` : "")
     : `<p class="muted sm">${t("noMatch")}</p>`;
+  const words = [...new Set(String(o.text || "").split(/[^\p{L}]+/u).filter((w) => w.length >= 5 && w.length <= 24 && /^[\p{L}]+$/u.test(w)))].slice(0, 14);
+  let wb = $("#words"); if (!wb) { wb = document.createElement("div"); wb.id = "words"; wb.className = "wordchips"; $("#facts").before(wb); }
+  wb.innerHTML = (!list.length || list[0].score < 0.97) && words.length ? `<p class="muted sm">${S.lang === "fa" ? "کلمه‌های خوانده‌شده؛ روی نام دارو بزن تا جست‌وجو شود:" : "Words read; tap the drug name to search:"}</p>` + words.map((w) => `<button type="button" class="chip" data-word="${esc(w)}">${esc(w)}</button>`).join(" ") : "";
   $("#facts").innerHTML = o.facts.map(([k, v]) => `<span><b>${esc(k)}</b>${esc(v)}</span>`).join("");
   $("#rawText").textContent = o.text + (o.log ? "\n\n--- log ---\n" + o.log : "");
 }
@@ -543,6 +571,7 @@ function init() {
   drop.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
   $("#thumbs").addEventListener("click", (e) => { const b = e.target.closest("[data-rm]"); if (b) { st.images.splice(+b.dataset.rm, 1); renderThumbs(); } });
   $("#scanBtn").onclick = doScan;
+  $("#candCard").addEventListener("click", (e) => { const w = e.target.closest("[data-word]"); if (!w) return; const q = $("#q1"); q.value = w.dataset.word; q.dispatchEvent(new Event("input")); q.scrollIntoView({ behavior: "smooth", block: "center" }); });
   $("#cands").addEventListener("click", (e) => {
     const o = st.lastOcr, b = e.target.closest("[data-key]"), all = e.target.closest("[data-all]");
     const base = { thumb: o?.thumb, ocr: o?.text };

@@ -1,0 +1,11 @@
+/* اطلاعات عمومی؛ بدون دوز؛ نیازمند بازبینی داروساز پیش از انتشار عمومی. جداکنندهٔ موارد: | ؛ ستون آخر: نام‌های دیگر (با ویرگول) */
+(function () {
+  const S = (s) => (s ? s.split("|").map((x) => x.trim()).filter((x) => x && x !== "—") : []);
+  const D = window.DRUGS || (window.DRUGS = {}), A = window.ALIASES || (window.ALIASES = {});
+  const K = ["use", "how", "side", "serious", "inter", "warn", "contra", "preg", "over"];
+  const add = (rows) => rows.forEach((r) => {
+    const o = { key: r[0], fa: r[1], cls: r[2] }; K.forEach((k, i) => (o[k] = S(r[3 + i]))); D[o.key] = o;
+    const names = [r[0], r[1], ...(r[12] ? r[12].split(",").map((x) => x.trim()) : [])].filter(Boolean);
+    A[o.key] = Array.from(new Set([...(A[o.key] || []), ...names]));
+  });
+  add([
