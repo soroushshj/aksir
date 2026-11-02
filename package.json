@@ -1,13 +1,15 @@
 {
   "name": "aksir-offline",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Aksir offline medicine scanner (Persian/English)",
   "dependencies": {
-    "@capacitor/android": "^6.1.2",
-    "@capacitor/core": "^6.1.2"
+    "@capacitor-mlkit/text-recognition": "^8.2.2",
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
+    "@capacitor/filesystem": "^8.1.5"
   },
   "devDependencies": {
-    "@capacitor/cli": "^6.1.2"
+    "@capacitor/cli": "^8.6.0"
   }
 }

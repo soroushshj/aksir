@@ -208,51 +208,81 @@ async function prepCanvas(blob, mode, rot = 0, maxSide = 1500) {
 }
 const WORKERS = {};
 const abs = (p) => new URL(p, location.href).href.replace(/\/$/, "");
+const NATIVE = () => !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const DBG = []; let LIVE = () => {}, T0 = Date.now();
+const dbg = (m) => { DBG.push(((Date.now() - T0) / 1000).toFixed(1) + "s " + m); if (DBG.length > 80) DBG.shift(); };
 function getWorker(lang) {
   if (WORKERS[lang]) return WORKERS[lang];
-  const H = { f: null };
+  const H = { f: null }; dbg("create worker " + lang);
   const p = Tesseract.createWorker(lang, 1, {
     workerPath: abs("lib/tess/worker.min.js"), corePath: abs("lib/tess/core"), langPath: abs("lib/tess/lang"),
-    gzip: true, workerBlobURL: false, cacheMethod: "none", logger: (m) => H.f && H.f(m),
-  }).then((w) => { w._set = (f) => { H.f = f; }; return w; });
-  p.catch(() => { delete WORKERS[lang]; });
+    gzip: true, workerBlobURL: false, cacheMethod: "none",
+    logger: (m) => { if (m.status !== "recognizing text") dbg(m.status + " " + Math.round((m.progress || 0) * 100) + "%"); LIVE(m); H.f && H.f(m); },
+  }).then((w) => { dbg("worker ready " + lang); w._set = (f) => { H.f = f; }; return w; });
+  p.catch((e) => { dbg("worker error " + (e && e.message)); delete WORKERS[lang]; });
   return (WORKERS[lang] = p);
 }
+const withTimeout = (p, ms, label) => new Promise((res, rej) => { const id = setTimeout(() => rej(new Error("timeout " + label)), ms); p.then((v) => { clearTimeout(id); res(v); }, (e) => { clearTimeout(id); rej(e); }); });
+async function mlkitText(blob, i) {
+  const P = window.Capacitor.Plugins, FS = P.Filesystem, TR = P.TextRecognition;
+  if (!FS || !TR) throw new Error("plugin missing");
+  const b64 = await new Promise((r, j) => { const fr = new FileReader(); fr.onload = () => r(String(fr.result).split(",")[1]); fr.onerror = j; fr.readAsDataURL(blob); });
+  const f = await FS.writeFile({ path: "aksir_scan_" + i + ".jpg", data: b64, directory: "CACHE" });
+  try { const res = await TR.processImage({ path: f.uri, script: "LATIN" }); return res.text || ""; }
+  finally { try { await FS.deleteFile({ path: f.uri }); } catch {} }
+}
 function planFor(pref) {
-  const E = [["eng", "11", "enh", 0, "eng"], ["eng", "11", "bin", 0, "alt"], ["eng", "6", "inv", 0, "alt"], ["eng", "11", "enh", 90, "rot"], ["eng", "11", "enh", 270, "rot"]];
+  const E = [["eng", "11", "enh", 0, "eng"], ["eng", "11", "bin", 0, "alt"], ["eng", "11", "enh", 90, "rot"], ["eng", "11", "enh", 270, "rot"]];
   const F = (l) => [[l, "11", "enh", 0, "fas"], [l, "3", "bin", 0, "fas"], [l, "11", "enh", 90, "rot"], [l, "11", "enh", 270, "rot"]];
-  return pref === "eng" ? E : pref === "fas" ? F("fas") : [...E.slice(0, 2), ...F("fas+eng"), ...E.slice(2)];
+  return pref === "eng" ? E : pref === "fas" ? F("fas") : [E[0], ...F("fas+eng"), ...E.slice(1)];
 }
 async function runOcr(onStage, onProgress) {
-  const imgs = st.images, n = imgs.length; let text = "", conf = 0, cnt = 0;
+  const imgs = st.images, n = imgs.length; let text = "", conf = 0, cnt = 0; const start = Date.now();
+  DBG.length = 0; T0 = Date.now(); dbg("scan start, images=" + n + ", native=" + NATIVE());
   const good = () => (findDrugs(text)[0]?.score || 0) >= 0.9;
-  const seen = {};
-  for (const [lang, psm, mode, rot, label] of planFor(S.ocr)) {
-    onStage(WORKERS[lang] ? label : "load");
-    const w = await getWorker(lang);
-    onStage(label);
-    await w.setParameters({ tessedit_pageseg_mode: psm, preserve_interword_spaces: "1" });
+  const done = () => ({ text: text.trim(), conf: cnt ? conf / cnt : 0, log: DBG.join("\n") });
+  if (NATIVE()) {
+    onStage("native");
     for (let i = 0; i < n; i++) {
-      w._set((m) => { if (m.status === "recognizing text") onProgress((i + m.progress) / n); });
-      const c = await prepCanvas(imgs[i].blob, mode, rot);
-      const r = await w.recognize(c);
-      const tx = r.data.text || ""; text += "\n" + tx; conf += r.data.confidence || 0; cnt++;
-      await new Promise((r2) => setTimeout(r2, 0));
-      if (good()) return { text: text.trim(), conf: cnt ? conf / cnt : 0 };
+      try { const tx = await withTimeout(mlkitText(imgs[i].blob, i), 40000, "mlkit"); dbg("mlkit " + i + " chars=" + tx.length); text += "\n" + tx; conf += 80; cnt++; onProgress((i + 1) / n); }
+      catch (e) { dbg("mlkit failed: " + (e && (e.message || e))); }
+      if (good()) return done();
     }
   }
-  return { text: text.trim(), conf: cnt ? conf / cnt : 0 };
+  for (const [lang, psm, mode, rot, label] of planFor(S.ocr)) {
+    if (Date.now() - start > 170000) { dbg("time budget over"); break; }
+    try {
+      onStage("load");
+      const w = await withTimeout(getWorker(lang), 120000, "load " + lang);
+      onStage(label);
+      await w.setParameters({ tessedit_pageseg_mode: psm, tessedit_do_invert: mode === "inv" ? "1" : "0", preserve_interword_spaces: "1" });
+      for (let i = 0; i < n; i++) {
+        w._set((m) => { if (m.status === "recognizing text") onProgress((i + m.progress) / n); });
+        const c = await prepCanvas(imgs[i].blob, mode, rot, 1100);
+        const t1 = Date.now();
+        let r;
+        try { r = await withTimeout(w.recognize(c), 60000, "recognize"); }
+        catch (e) { dbg("recognize failed " + e.message); try { w.terminate(); } catch {} delete WORKERS[lang]; throw e; }
+        dbg("tess " + lang + " psm" + psm + " " + mode + " rot" + rot + " " + ((Date.now() - t1) / 1000).toFixed(1) + "s");
+        text += "\n" + (r.data.text || ""); conf += r.data.confidence || 0; cnt++;
+        await new Promise((r2) => setTimeout(r2, 0));
+        if (good()) return done();
+      }
+    } catch (e) { dbg("step failed: " + (e && e.message)); }
+  }
+  return done();
 }
 async function doScan() {
   if (!st.images.length || st.busy) return;
   st.busy = true; $("#scanBtn").disabled = true; $("#progress").hidden = false;
   const t0 = Date.now(), pt = $("#progressText"), fill = $("#barFill");
   const timer = setInterval(() => { const base = pt.dataset.base || ""; pt.textContent = base + ` · ${Math.round((Date.now() - t0) / 1000)} ${t("sec")}`; }, 1000);
-  const setStage = (k) => { pt.dataset.base = t("stage_" + k); pt.textContent = pt.dataset.base; if (k === "load") fill.style.width = "6%"; };
+  LIVE = (m) => { if (m.status && m.status !== "recognizing text") { pt.dataset.base = (pt.dataset.stage || "") + " · " + m.status + " " + Math.round((m.progress || 0) * 100) + "%"; } };
+  const setStage = (k) => { pt.dataset.stage = t("stage_" + k); pt.dataset.base = t("stage_" + k); pt.textContent = pt.dataset.base; if (k === "load") fill.style.width = "6%"; };
   try {
     const r = await runOcr(setStage, (p) => (fill.style.width = Math.max(8, Math.round(p * 100)) + "%"));
     fill.style.width = "100%";
-    st.lastOcr = { text: r.text, conf: r.conf, found: findDrugs(r.text), facts: extractFacts(r.text), thumb: st.images[0]?.url || "" };
+    st.lastOcr = { log: r.log, text: r.text, conf: r.conf, found: findDrugs(r.text), facts: extractFacts(r.text), thumb: st.images[0]?.url || "" };
     renderCands();
     $("#candCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
     if (st.lastOcr.found.length === 1 || (st.lastOcr.found[0] && st.lastOcr.found[0].score >= 0.97 && DRUGS[st.lastOcr.found[0].key])) { /* wait for user tap: avoids wrong auto-picks */ }
@@ -270,7 +300,7 @@ function renderCands() {
     + (list.length > 1 ? `<button class="btn soft" data-all="1">${S.lang === "fa" ? "همهٔ این‌ها (بستهٔ ترکیبی)" : "All of these (combination pack)"}</button>` : "")
     : `<p class="muted sm">${t("noMatch")}</p>`;
   $("#facts").innerHTML = o.facts.map(([k, v]) => `<span><b>${esc(k)}</b>${esc(v)}</span>`).join("");
-  $("#rawText").textContent = o.text;
+  $("#rawText").textContent = o.text + (o.log ? "\n\n--- log ---\n" + o.log : "");
 }
 
 /* ------------------------------------------------------------------ history (IndexedDB with localStorage fallback) */
@@ -454,7 +484,7 @@ function reportHTML() {
 header{border-bottom:3px solid ${esc(S.accent)};padding-bottom:12px}h1{margin:0}h2{font-size:17px;margin:22px 0 6px;color:#0b3d33}li{margin:4px 0}.q{background:#eef6f3;border-radius:12px;padding:8px 14px;margin:12px 0 4px;font-weight:700}.a{padding:2px 14px 8px;border-inline-start:3px solid ${esc(S.accent)}}.a h4{margin:6px 0 2px;color:#0b3d33}
 .disc{background:#fff8e6;border:1px solid #f0d9a0;border-radius:12px;padding:12px;font-size:13px;margin-top:22px}footer{margin-top:16px;font-size:12px;color:#657786;display:flex;justify-content:space-between;flex-wrap:wrap}@media print{body{background:#fff;padding:0}}</style>
 <main><header><h1>${esc(faName(c.active))}</h1><small>${esc(titleEn(c.active))} · ${new Date().toLocaleString(fa ? "fa-IR" : "en-GB")}</small></header>${c.thumb ? `<p><img src="${c.thumb}" style="height:120px;border-radius:12px"></p>` : ""}${sec}${qa ? `<h2>${t("askTitle")}</h2>${qa}` : ""}
-<div class="disc">${t("disclaimer")}</div><footer><span>Aksir · اکسیر</span><span>${t("credit")}: سروش شجاعی · Soroush Shojaei</span></footer></main></html>`;
+<div class="disc">${t("disclaimer")}</div><footer><span>${t("footer")}</span></footer></main></html>`;
 }
 async function doReport() {
   if (!st.cur) return;
@@ -501,7 +531,7 @@ function bindSettings() {
 window.__aksir = { findDrugs, norm };
 function init() {
   applyTheme(); bindSettings(); applyLang();
-  setTimeout(() => { try { getWorker(S.ocr === "fas" ? "fas" : "eng"); } catch {} }, 1500);
+  if (!NATIVE()) setTimeout(() => { try { getWorker(S.ocr === "fas" ? "fas" : "eng"); } catch {} }, 1500);
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => S.appearance === "system" && applyTheme());
   $("#langBtn").onclick = () => { S.lang = S.lang === "fa" ? "en" : "fa"; saveS(); applyLang(); };
   $("#camBtn").onclick = () => $("#capture").click(); $("#pickBtn").onclick = () => $("#file").click();
@@ -546,7 +576,7 @@ function init() {
   });
   try { speechSynthesis.onvoiceschanged = loadVoices; loadVoices(); } catch {}
   loadHist();
-  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) navigator.serviceWorker.register("sw.js").catch(() => {});
+  if ("serviceWorker" in navigator && location.protocol.startsWith("http") && !window.Capacitor?.isNativePlatform?.()) navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 document.addEventListener("DOMContentLoaded", init);
 })();
